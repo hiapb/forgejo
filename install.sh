@@ -17,11 +17,11 @@ die()  { echo -e "\033[31m[FATAL]\033[0m $1" >&2; exit 1; }
 require_cmd() {
     local cmd=$1
     if ! command -v "$cmd" >/dev/null 2>&1; then
-        info "探测到缺失底层组件: $cmd，正在唤醒自动化装载引擎..."
+        info "正在安装缺失组件: $cmd ..."
         if [[ "$cmd" == "docker" ]]; then
-            curl -fsSL https://get.docker.com | bash -s docker >/dev/null 2>&1 || die "Docker 核心引擎注入失败，请检查网络。"
+            curl -fsSL https://get.docker.com | bash -s docker >/dev/null 2>&1 || die "Docker 安装失败，请检查网络。"
         elif [[ "$cmd" == "docker-compose" ]]; then
-            die "未检测到 docker-compose 调度器，此组件通常随 Docker 并发安装，请检查系统环境。"
+            die "未检测到 docker-compose，请检查系统环境。"
         else
             if command -v apt-get >/dev/null 2>&1; then
                 export DEBIAN_FRONTEND=noninteractive
@@ -32,12 +32,12 @@ require_cmd() {
             elif command -v apk >/dev/null 2>&1; then
                 apk add -q "$cmd" >/dev/null 2>&1
             else
-                die "未能识别宿主机包管理器，无法静默安装 $cmd。"
+                die "未能识别包管理器，无法安装 $cmd。"
             fi
         fi
         
-        command -v "$cmd" >/dev/null 2>&1 || die "组件 $cmd 强行挂载失败，可能存在进程死锁。"
-        info "组件 $cmd 已无缝装载完毕。"
+        command -v "$cmd" >/dev/null 2>&1 || die "组件 $cmd 安装失败。"
+        info "组件 $cmd 安装完成。"
     fi
 }
 
@@ -64,8 +64,18 @@ get_workdir() {
     echo ""
 }
 
+check_deployed() {
+    local wd=$(get_workdir)
+    if [[ -z "$wd" ]]; then
+        echo -e "\033[33m[提示] 未检测到 Forgejo 实例，请先执行 [1] 一键部署，或 [6] 恢复备份。\033[0m"
+        sleep 2
+        return 1
+    fi
+    return 0
+}
+
 deploy_forgejo() {
-    info "== 启动 Forgejo 自动化部署编排 =="
+    info "== 启动 Forgejo 自动化部署 =="
     require_cmd curl
     require_cmd docker
     require_cmd openssl
@@ -84,13 +94,13 @@ deploy_forgejo() {
     echo "$install_path" > "/etc/forgejo_env"
     cd "$install_path" || return
 
-    read -r -p "请输入对外 HTTP 访问端口 [默认: 3000]: " input_port
+    read -r -p "请输入 HTTP 访问端口 [默认: 3000]: " input_port
     local host_port=${input_port:-3000}
     
     read -r -p "请输入 Git SSH 协议端口 [默认: 2222]: " input_ssh_port
     local ssh_port=${input_ssh_port:-2222}
 
-    info "正在生成核心配置与高强度密钥..."
+    info "正在生成配置与密钥..."
     local db_pass=$(openssl rand -hex 24)
     
     cat > .env <<EOF
@@ -149,14 +159,13 @@ EOF
     mkdir -p data postgres_data
     chmod -R 777 data postgres_data
 
-    info "正在拉起微服务矩阵 (首次拉取需 1-3 分钟)..."
-    $dc_cmd up -d || { err "容器启动失败，请检查端口是否被占用。"; return; }
+    info "正在启动容器 (首次需 1-3 分钟)..."
+    $dc_cmd up -d || { err "启动失败，请检查端口是否被占用。"; return; }
 
     local server_ip=$(get_local_ip)
 
     echo -e "\n=================================================="
-    echo -e "\033[32m部署指令已下发！服务正在启动。\033[0m"
-    echo -e "请务必在服务器防火墙中放行 \033[31m${host_port}\033[0m 和 \033[31m${ssh_port}\033[0m 端口！"
+    echo -e "\033[32m部署完成！\033[0m"
     echo -e "访问地址: \033[36mhttp://${server_ip}:${host_port}\033[0m"
     echo -e "\033[33m提示: 请立即访问网页，首个注册用户即为超级管理员。\033[0m"
     echo -e "==================================================\n"
@@ -164,52 +173,41 @@ EOF
 
 upgrade_service() {
     local workdir=$(get_workdir)
-    if [[ -z "$workdir" ]]; then
-        err "未检测到运行环境，请先部署。"
-        return
-    fi
     cd "$workdir" || return
     info "正在拉取最新镜像并重建容器..."
     $(docker_compose_cmd) pull
     $(docker_compose_cmd) up -d
-    info "平滑升级完成！"
+    info "升级完成！"
 }
 
 pause_service() {
     local workdir=$(get_workdir)
-    [[ -z "$workdir" ]] && return
     cd "$workdir" && $(docker_compose_cmd) stop || true
-    info "服务已静默。"
+    info "服务已停止。"
 }
 
 restart_service() {
     local workdir=$(get_workdir)
-    [[ -z "$workdir" ]] && return
     cd "$workdir" && $(docker_compose_cmd) restart || true
     info "服务已重启。"
 }
 
 do_backup() {
     local workdir=$(get_workdir)
-    if [[ -z "$workdir" ]]; then
-        err "未检测到部署环境，操作终止。"
-        return
-    fi
-    
     require_cmd tar
     local backup_dir="${workdir}/backups"
     mkdir -p "$backup_dir"
     local timestamp=$(date +"%Y%m%d_%H%M%S")
     local backup_file="${backup_dir}/forgejo_backup_${timestamp}.tar.gz"
     
-    info "开始提取全局物理快照..."
+    info "开始执行备份..."
     cd "$workdir" || return
     
     $(docker_compose_cmd) stop >/dev/null 2>&1
     
     local target_files=$(ls -A | grep -E 'docker-compose.yml|\.env|data|postgres_data|github_accounts\.conf|forgejo_token\.conf' || true)
     if [[ -z "$target_files" ]]; then
-        err "未发现有效业务卷，提取失败。"
+        err "未找到核心数据，备份终止。"
         $(docker_compose_cmd) start >/dev/null 2>&1
         return
     fi
@@ -221,7 +219,7 @@ do_backup() {
     cd "$backup_dir" || return
     ls -t forgejo_backup_*.tar.gz 2>/dev/null | awk 'NR>3' | xargs -I {} rm -f {}
     
-    info "备份执行完毕。含 GitHub 密钥、数据库、代码资产的全量胶囊已生成："
+    info "备份完毕。可用备份如下："
     for f in $(ls -t forgejo_backup_*.tar.gz 2>/dev/null); do
         local abs_path="${backup_dir}/${f}"
         local fsize=$(du -h "$f" | cut -f1)
@@ -230,7 +228,7 @@ do_backup() {
 }
 
 restore_backup() {
-    info "== 灾备恢复引擎 =="
+    info "== 恢复备份 =="
     require_cmd tar
     
     local default_backup=""
@@ -243,7 +241,7 @@ restore_backup() {
     
     local backup_path=""
     if [[ -n "$default_backup" ]]; then
-        echo -e "已嗅探到可用快照: \033[33m${default_backup}\033[0m"
+        echo -e "检测到最新备份: \033[33m${default_backup}\033[0m"
         read -r -p "请输入备份文件路径 [直接回车使用默认]: " input_backup
         backup_path=${input_backup:-$default_backup}
     else
@@ -251,7 +249,7 @@ restore_backup() {
     fi
     
     if [[ ! -f "$backup_path" ]]; then 
-        err "目标快照不存在或已损坏。"
+        err "备份文件不存在。"
         return
     fi
     
@@ -259,10 +257,10 @@ restore_backup() {
     local target_dir=${input_path:-$DEFAULT_INSTALL_PATH}
     
     if [[ -d "$target_dir" && -f "$target_dir/docker-compose.yml" ]]; then
-        warn "目标路径存在旧星系，强行恢复将覆盖原有文明！"
-        read -r -p "是否强制覆盖？(y/N): " force_override
+        warn "目标路径已存在实例，恢复将覆盖现有数据！"
+        read -r -p "是否继续覆盖？(y/N): " force_override
         if [[ ! "$force_override" =~ ^[Yy]$ ]]; then
-            info "已取消回滚。"
+            info "已取消恢复。"
             return
         fi
         cd "$target_dir" && $(docker_compose_cmd) down >/dev/null 2>&1 || true
@@ -270,34 +268,29 @@ restore_backup() {
     fi
     
     mkdir -p "$target_dir"
-    tar -xzf "$backup_path" -C "$target_dir" || { err "快照解压溃灭。"; return; }
+    tar -xzf "$backup_path" -C "$target_dir" || { err "解压失败。"; return; }
     
     echo "$target_dir" > "/etc/forgejo_env"
     cd "$target_dir" || return
     
     chmod -R 777 data postgres_data || true
     
-    $(docker_compose_cmd) up -d || { err "引擎点火失败。"; return; }
+    $(docker_compose_cmd) up -d || { err "启动失败。"; return; }
     
     local server_ip=$(get_local_ip)
     local host_port=$(grep -oP '^SERVER_PORT=\K.*' .env || echo "3000")
     
     echo -e "\n=================================================="
-    echo -e "\033[32m✅ 资产快照已成功回滚注入！包含所有同步密钥配置。\033[0m"
+    echo -e "\033[32m✅ 恢复完成！\033[0m"
     echo -e "访问地址: \033[36mhttp://${server_ip}:${host_port}\033[0m"
     echo -e "==================================================\n"
 }
 
 setup_auto_backup() {
     require_cmd crontab
-    info "== 定时备份策略管控 =="
+    info "== 定时备份 =="
 
     local workdir=$(get_workdir)
-    if [[ -z "$workdir" ]]; then
-        err "未检测到部署环境，无法配置。"
-        return
-    fi
-
     local existing_cron=""
     local reset_cron=""
     local cron_type=""
@@ -313,9 +306,8 @@ setup_auto_backup() {
     existing_cron="$(crontab -l 2>/dev/null | sed -n "/^${CRON_TAG_BEGIN}$/,/^${CRON_TAG_END}$/p" | grep -v "^#" || true)"
 
     if [[ -n "$existing_cron" ]]; then
-        echo -e "\033[36m>>> 发现正在运行的定时任务:\033[0m"
+        echo -e "\033[36m发现正在运行的定时任务:\033[0m"
         echo -e "\033[33m${existing_cron}\033[0m"
-        echo -e "---------------------------------------------------"
         read -r -p "是否覆盖/重置？(y/N): " reset_cron
         if [[ ! "$reset_cron" =~ ^[Yy]$ ]]; then
             info "已保留当前配置。"
@@ -333,7 +325,7 @@ setup_auto_backup() {
         case "$min_interval" in
             1|2|3|4|5|6|10|12|15|20|30)
                 cron_spec="*/${min_interval} * * * *"
-                info "已下发指令：每 ${min_interval} 分钟执行一次。"
+                info "已设置：每 ${min_interval} 分钟执行一次。"
                 ;;
             *)
                 err "不支持的分钟间隔。"
@@ -354,14 +346,14 @@ setup_auto_backup() {
         [[ -z "$hour" ]] && hour="0"
         [[ -z "$minute" ]] && minute="0"
         cron_spec="${minute} ${hour} * * *"
-        info "已下发指令：每天 ${cron_time} 执行一次。"
+        info "已设置：每天 ${cron_time} 执行一次。"
 
     elif [[ "$cron_type" == "3" ]]; then
         tmp_cron="$(mktemp)" || return
         crontab -l 2>/dev/null | sed "/^${CRON_TAG_BEGIN}$/,/^${CRON_TAG_END}$/d" > "$tmp_cron" || true
         crontab "$tmp_cron" 2>/dev/null || true
         rm -f "$tmp_cron" "$cron_script" 
-        info "定时调度链已被彻底剥离。"
+        info "已删除定时备份任务。"
         return
     else
         err "无效的选择。"
@@ -409,20 +401,15 @@ EOF
     crontab "$tmp_cron" 2>/dev/null
     rm -f "$tmp_cron"
 
-    info "调度链路锚定完毕。"
+    info "定时备份设置完成。"
 }
 
 uninstall_service() {
     local workdir=$(get_workdir)
-    if [[ -z "$workdir" ]]; then
-        err "未检测到活跃实例，无法执行摧毁。"
-        return
-    fi
-    
-    echo -e "\033[31m⚠️ 焦土级警告：此操作将执行 --rmi all 和卷删除，彻底粉碎容器、镜像层及所有物理账本！\033[0m"
-    read -r -p "请再次确认是否化为灰烬？(y/N): " confirm
+    echo -e "\033[31m⚠️ 警告：这将彻底摧毁所有容器、镜像及业务数据！\033[0m"
+    read -r -p "确认完全卸载？(y/N): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        info "终止核爆倒计时。"
+        info "操作已取消。"
         return
     fi
     
@@ -438,13 +425,13 @@ uninstall_service() {
     crontab "$tmp_cron" 2>/dev/null || true
     rm -f "$tmp_cron" || true
     
-    info "物理销毁完毕，环境已绝对净化。"
+    info "容器及数据已被彻底抹除。"
 }
 
 install_ftp(){
     clear
     require_cmd curl
-    echo -e "\033[32m📂 触发外部存储传送门...\033[0m"
+    echo -e "\033[32m📂 FTP/SFTP 备份工具...\033[0m"
     bash <(curl -L https://raw.githubusercontent.com/hiapb/ftp/main/back.sh)
     sleep 2
     exit 0
@@ -455,11 +442,6 @@ github_sync_manager() {
     require_cmd curl
     
     local workdir=$(get_workdir)
-    if [[ -z "$workdir" ]]; then
-        err "未检测到主基地运行环境，请先执行部署。"
-        return
-    fi
-    
     local gh_conf="${workdir}/github_accounts.conf"
     local fg_conf="${workdir}/forgejo_token.conf"
     touch "$gh_conf" "$fg_conf"
@@ -467,44 +449,43 @@ github_sync_manager() {
     while true; do
         clear
         echo "==================================================="
-        echo "              GitHub 多账号同步中心               "
+        echo "              GitHub 账号同步管理               "
         echo "==================================================="
-        echo "  1) 录入 GitHub 账号 (需 PAT Token)"
-        echo "  2) 剥离 GitHub 账号"
-        echo "  3) 锚定本地 Forgejo API Token"
-        echo "  4) 执行跨星系仓库牵引"
-        echo "  0) 撤回主菜单"
+        echo "  1) 添加账号"
+        echo "  2) 删除账号"
+        echo "  3) 设置 Forgejo API Token"
+        echo "  4) 同步仓库"
+        echo "  0) 返回主菜单"
         echo "==================================================="
-        read -r -p "下达指令 [0-4]: " gh_choice
+        read -r -p "请输入序号 [0-4]: " gh_choice
         
         case "$gh_choice" in
             1)
-                read -r -p "请输入 GitHub 用户名: " gh_user
-                read -r -p "请输入该账号的 PAT 密钥: " gh_pat
-                if grep -q "^${gh_user}:" "$gh_conf"; then
-                    sed -i "/^${gh_user}:/d" "$gh_conf"
-                fi
-                echo "${gh_user}:${gh_pat}" >> "$gh_conf"
-                info "账号 $gh_user 的量子纠缠已建立。"
+                read -r -p "请输入自定义名称 (如: 大号/外包号): " gh_alias
+                read -r -p "请输入该账号的 GitHub 用户名: " gh_user
+                read -r -p "请输入 GitHub PAT 密钥: " gh_pat
+                sed -i "/^${gh_alias}:/d" "$gh_conf" 2>/dev/null || true
+                echo "${gh_alias}:${gh_user}:${gh_pat}" >> "$gh_conf"
+                info "账号 [${gh_alias}] 添加成功。"
                 sleep 1
                 ;;
             2)
-                read -r -p "请输入要剥离的 GitHub 用户名: " rm_user
-                sed -i "/^${rm_user}:/d" "$gh_conf"
-                info "账号 $rm_user 的链接已被切断。"
+                read -r -p "请输入要删除的自定义名称: " rm_alias
+                sed -i "/^${rm_alias}:/d" "$gh_conf"
+                info "账号 [${rm_alias}] 已删除。"
                 sleep 1
                 ;;
             3)
-                echo -e "\033[33m前置：请前往本地 Forgejo [设置]->[应用] 生成 repo 权限令牌。\033[0m"
+                echo -e "\033[33m提示：请在本地 Forgejo [设置]->[应用] 中生成带有 repo 权限的 API Token。\033[0m"
                 read -r -p "请输入 Forgejo 管理员用户名: " fg_user
                 read -r -p "请输入 Forgejo API Token: " fg_token
                 echo "${fg_user}:${fg_token}" > "$fg_conf"
-                info "主基地中枢令牌已锁定。"
+                info "Forgejo API Token 设置成功。"
                 sleep 1
                 ;;
             4)
                 if [[ ! -s "$fg_conf" ]]; then
-                    err "未检测到中枢令牌，请先执行 [3]。"
+                    err "未检测到 Forgejo API Token，请先执行 [3] 设置。"
                     sleep 2
                     continue
                 fi
@@ -514,48 +495,49 @@ github_sync_manager() {
                 local local_api_base="http://127.0.0.1:${host_port}/api/v1"
 
                 if [[ ! -s "$gh_conf" ]]; then
-                    err "探测列表为空，请先录入异星节点。"
+                    err "账号列表为空，请先执行 [1] 添加账号。"
                     sleep 2
                     continue
                 fi
 
-                echo "--- 当前锁定的异星节点列表 ---"
-                cat "$gh_conf" | cut -d':' -f1 | cat -n
-                read -r -p "请指定要牵引的节点序号: " acc_idx
+                echo "--- 当前账号列表 ---"
+                cat "$gh_conf" | awk -F':' '{print $1 " (用户名: " $2 ")"}' | cat -n
+                read -r -p "请选择要同步的账号序号: " acc_idx
                 local selected_line=$(sed -n "${acc_idx}p" "$gh_conf")
                 if [[ -z "$selected_line" ]]; then
-                    err "越界输入。"
+                    err "输入无效。"
                     sleep 1
                     continue
                 fi
                 
-                local current_gh_user=$(echo "$selected_line" | cut -d':' -f1)
-                local current_gh_pat=$(echo "$selected_line" | cut -d':' -f2)
+                local current_gh_alias=$(echo "$selected_line" | cut -d':' -f1)
+                local current_gh_user=$(echo "$selected_line" | cut -d':' -f2)
+                local current_gh_pat=$(echo "$selected_line" | cut -d':' -f3)
 
-                echo "正在向 $current_gh_user 辐射探测波段..."
+                info "正在获取 [${current_gh_alias}] 的仓库列表..."
                 local repos_json=$(curl -s -H "Authorization: token $current_gh_pat" "https://api.github.com/user/repos?per_page=100&affiliation=owner")
                 local repo_count=$(echo "$repos_json" | jq '. | length')
                 
                 if [[ "$repo_count" == "0" || "$repo_count" == "" ]]; then
-                    err "该节点没有反馈任何物资，或令牌权限衰减。"
+                    err "未找到任何仓库，或 PAT 密钥无效。"
                     sleep 2
                     continue
                 fi
                 
-                info "雷达反馈：扫描到 $repo_count 个高能资源包。"
-                echo " 牵引策略:"
-                echo "  1) 无人值守全量吞噬"
-                echo "  2) 手工点选精确制导"
-                read -r -p "确定执行路径 [1/2]: " sync_mode
+                info "共找到 $repo_count 个仓库。"
+                echo " 同步方式:"
+                echo "  1) 全部同步"
+                echo "  2) 逐个询问同步"
+                read -r -p "请选择 [1/2]: " sync_mode
 
                 for (( i=0; i<$repo_count; i++ )); do
                     local r_name=$(echo "$repos_json" | jq -r ".[$i].name")
                     local r_url=$(echo "$repos_json" | jq -r ".[$i].clone_url")
                     
                     if [[ "$sync_mode" == "2" ]]; then
-                        read -r -p "➤ 是否跨界跳跃仓库 [\033[36m$r_name\033[0m] ? (y/n/q中止): " ask_sync
+                        read -r -p "➤ 是否同步仓库 [\033[36m$r_name\033[0m] ? (y/n/q退出): " ask_sync
                         if [[ "$ask_sync" == "q" || "$ask_sync" == "Q" ]]; then
-                            info "引力波发生器已强行关停。"
+                            info "已终止同步。"
                             break
                         fi
                         if [[ "$ask_sync" != "y" && "$ask_sync" != "Y" ]]; then
@@ -563,7 +545,7 @@ github_sync_manager() {
                         fi
                     fi
                     
-                    info "引擎正在接管流管束 -> $r_name"
+                    info "正在同步 -> $r_name"
                     local payload=$(jq -n \
                         --arg clone_addr "$r_url" \
                         --arg auth_token "$current_gh_pat" \
@@ -577,30 +559,30 @@ github_sync_manager() {
                         -d "$payload")
 
                     if [[ "$http_code" == "201" ]]; then
-                        echo -e "   \033[32m[✓] $r_name 实体重塑完成，基因序列完整。\033[0m"
+                        echo -e "   \033[32m[✓] $r_name 同步成功。\033[0m"
                     elif [[ "$http_code" == "409" ]]; then
-                        echo -e "   \033[33m[-] 本地时间线已存在该实体，剥离。\033[0m"
+                        echo -e "   \033[33m[-] 仓库 $r_name 已存在，跳过。\033[0m"
                     else
-                        echo -e "   \033[31m[x] $r_name 跃迁失败，空间断层报错码: $http_code\033[0m"
+                        echo -e "   \033[31m[x] $r_name 同步失败，错误码: $http_code\033[0m"
                     fi
 
                     if [[ "$sync_mode" == "2" && $((i + 1)) -lt $repo_count ]]; then
-                        read -r -p "    回车进入下一序列，输入 'q' 阻断充能..." ask_continue
+                        read -r -p "    按回车继续，输入 'q' 退出..." ask_continue
                         if [[ "$ask_continue" == "q" || "$ask_continue" == "Q" ]]; then
-                            info "队列处理强行干预跳出。"
+                            info "已退出同步列队。"
                             break
                         fi
                     fi
                 done
                 
-                info "本轮迁徙战役顺利结束。"
-                read -r -p "按回车键撤离战场..."
+                info "同步任务处理完毕！"
+                read -r -p "按回车键返回..."
                 ;;
             0)
                 return
                 ;;
             *)
-                warn "逻辑冲突，拒绝执行。"
+                warn "无效的输入。"
                 sleep 1
                 ;;
         esac
@@ -613,7 +595,7 @@ main_menu() {
     echo "                 Forgejo 一键管理                 "
     echo "==================================================="
     local wd=$(get_workdir)
-    echo -e " 实例运行路径: \033[36m${wd:-未部署}\033[0m"
+    echo -e " 实例路径: \033[36m${wd:-未部署 (请先执行部署或恢复)}\033[0m"
     echo "---------------------------------------------------"
     echo "  1) 一键部署"
     echo "  2) 升级服务"
@@ -624,23 +606,23 @@ main_menu() {
     echo "  7) 定时备份"
     echo "  8) 完全卸载"
     echo "  9) 📂 FTP/SFTP 备份工具"
-    echo " 10) 🐙 GitHub 多账号同步中心"
+    echo " 10) GitHub 账号同步管理"
     echo "  0) 退出脚本"
     echo "==================================================="
     
-    read -r -p "请输入操作序号 [0-10]: " choice
+    read -r -p "请输入序号 [0-10]: " choice
     case "$choice" in
         1) deploy_forgejo ;;
-        2) upgrade_service ;;
-        3) pause_service ;;
-        4) restart_service ;;
-        5) do_backup ;;
+        2) check_deployed && upgrade_service ;;
+        3) check_deployed && pause_service ;;
+        4) check_deployed && restart_service ;;
+        5) check_deployed && do_backup ;;
         6) restore_backup ;;
-        7) setup_auto_backup ;;
-        8) uninstall_service ;;
+        7) check_deployed && setup_auto_backup ;;
+        8) check_deployed && uninstall_service ;;
         9) install_ftp ;;
-        10) github_sync_manager ;;
-        0) info "通信切断，随时待命。"; exit 0 ;;
+        10) check_deployed && github_sync_manager ;;
+        0) info "欢迎下次使用，再见!"; exit 0 ;;
         *) warn "无效的指令，请重新输入。" ;;
     esac
 }
@@ -648,7 +630,7 @@ main_menu() {
 if [[ "${1:-}" == "run-backup" ]]; then
     do_backup
 else
-    if [[ $EUID -ne 0 ]]; then die "权限收敛：系统拒绝普通权限访问，请使用 Root。"; fi
+    if [[ $EUID -ne 0 ]]; then die "权限不足：请使用 root 权限执行脚本。"; fi
     while true; do
         main_menu
         echo ""
