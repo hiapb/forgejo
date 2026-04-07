@@ -528,14 +528,46 @@ github_sync_manager() {
                 echo " 同步方式:"
                 echo "  1) 全部同步"
                 echo "  2) 逐个询问同步"
-                read -r -p "请选择 [1/2]: " sync_mode
+                echo "  3) 指定仓库名称同步"
+                read -r -p "请选择 [1/2/3]: " sync_mode
+
+                # 绝对严格的白名单校验，彻底阻断越权流
+                if [[ "$sync_mode" != "1" && "$sync_mode" != "2" && "$sync_mode" != "3" ]]; then
+                    err "非法的选项，已终止同步请求。"
+                    sleep 2
+                    continue
+                fi
+
+                local target_repo_name=""
+                if [[ "$sync_mode" == "3" ]]; then
+                    read -r -p "请输入您要精确同步的仓库名称: " target_repo_name
+                    if [[ -z "$target_repo_name" ]]; then
+                        err "仓库名称不能为空。"
+                        sleep 1
+                        continue
+                    fi
+                fi
+
+                local matched_count=0
 
                 for (( i=0; i<$repo_count; i++ )); do
                     local r_name=$(echo "$repos_json" | jq -r ".[$i].name")
                     local r_url=$(echo "$repos_json" | jq -r ".[$i].clone_url")
                     
+                    # 模式 3 拦截：名称不匹配直接跳过
+                    if [[ "$sync_mode" == "3" && "$r_name" != "$target_repo_name" ]]; then
+                        continue
+                    fi
+
+                    matched_count=$((matched_count + 1))
+
+                    local exist_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token ${local_fg_token}" "${local_api_base}/repos/${local_fg_user}/${r_name}")
+                    if [[ "$exist_code" == "200" ]]; then
+                        echo -e "   \033[33m[-] [本地已存在] \033[36m$r_name\033[0m，自动跳过。\033[0m"
+                        continue
+                    fi
+
                     if [[ "$sync_mode" == "2" ]]; then
-                        # 【核心修正区】：将带有颜色的 UI 渲染与用户的输入捕获彻底解耦，防止底层终端将转义符当做字符串输出。
                         echo -e -n "➤ 是否同步仓库 [\033[36m${r_name}\033[0m] ? (y/n/q退出): "
                         read -r ask_sync
                         
@@ -548,37 +580,45 @@ github_sync_manager() {
                         fi
                     fi
                     
-                    info "正在同步 -> $r_name"
-                    local payload=$(jq -n \
-                        --arg clone_addr "$r_url" \
-                        --arg auth_token "$current_gh_pat" \
-                        --arg repo_name "$r_name" \
-                        --arg service "github" \
-                        '{clone_addr: $clone_addr, auth_token: $auth_token, repo_name: $repo_name, service: $service, mirror: false}')
+                    while true; do
+                        info "正在同步 -> $r_name"
+                        
+                        local payload=$(jq -n \
+                            --arg clone_addr "$r_url" \
+                            --arg auth_token "$current_gh_pat" \
+                            --arg repo_name "$r_name" \
+                            --arg service "github" \
+                            --arg repo_owner "$local_fg_user" \
+                            '{clone_addr: $clone_addr, auth_token: $auth_token, repo_name: $repo_name, service: $service, mirror: false, repo_owner: $repo_owner}')
 
-                    local http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${local_api_base}/repos/migrate" \
-                        -H "Authorization: token ${local_fg_token}" \
-                        -H "Content-Type: application/json" \
-                        -d "$payload")
+                        local http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${local_api_base}/repos/migrate" \
+                            -H "Authorization: token ${local_fg_token}" \
+                            -H "Content-Type: application/json" \
+                            -d "$payload")
 
-                    if [[ "$http_code" == "201" ]]; then
-                        echo -e "   \033[32m[✓] $r_name 同步成功。\033[0m"
-                    elif [[ "$http_code" == "409" ]]; then
-                        echo -e "   \033[33m[-] 仓库 $r_name 已存在，跳过。\033[0m"
-                    else
-                        echo -e "   \033[31m[x] $r_name 同步失败，错误码: $http_code\033[0m"
-                    fi
-
-                    if [[ "$sync_mode" == "2" && $((i + 1)) -lt $repo_count ]]; then
-                        read -r -p "    按回车继续，输入 'q' 退出..." ask_continue
-                        if [[ "$ask_continue" == "q" || "$ask_continue" == "Q" ]]; then
-                            info "已退出同步列队。"
+                        if [[ "$http_code" == "201" ]]; then
+                            echo -e "   \033[32m[✓] $r_name 同步成功。\033[0m"
                             break
+                        elif [[ "$http_code" == "409" ]]; then
+                            echo -e "   \033[33m[-] 仓库 $r_name 已存在，跳过。\033[0m"
+                            break
+                        else
+                            echo -e "   \033[31m[x] $r_name 同步失败，错误码: $http_code\033[0m"
+                            echo -e -n "   ➤ 是否重新尝试同步该仓库? (y/n): "
+                            read -r retry_ans
+                            if [[ "$retry_ans" != "y" && "$retry_ans" != "Y" ]]; then
+                                break
+                            fi
                         fi
-                    fi
+                    done
                 done
                 
-                info "同步任务处理完毕！"
+                if [[ "$sync_mode" == "3" && "$matched_count" == "0" ]]; then
+                    warn "在 GitHub 账号 [${current_gh_alias}] 中未找到名为 [${target_repo_name}] 的仓库，请核对拼写。"
+                else
+                    info "同步任务处理完毕！"
+                fi
+
                 read -r -p "按回车键返回..."
                 ;;
             0)
