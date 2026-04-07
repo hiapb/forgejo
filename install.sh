@@ -535,7 +535,10 @@ github_sync_manager() {
                     local r_url=$(echo "$repos_json" | jq -r ".[$i].clone_url")
                     
                     if [[ "$sync_mode" == "2" ]]; then
-                        read -r -p "➤ 是否同步仓库 [\033[36m$r_name\033[0m] ? (y/n/q退出): " ask_sync
+                        # 【核心修正区】：将带有颜色的 UI 渲染与用户的输入捕获彻底解耦，防止底层终端将转义符当做字符串输出。
+                        echo -e -n "➤ 是否同步仓库 [\033[36m${r_name}\033[0m] ? (y/n/q退出): "
+                        read -r ask_sync
+                        
                         if [[ "$ask_sync" == "q" || "$ask_sync" == "Q" ]]; then
                             info "已终止同步。"
                             break
