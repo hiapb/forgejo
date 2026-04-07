@@ -537,6 +537,14 @@ github_sync_manager() {
                     continue
                 fi
 
+                local exclude_forks="y"
+                if [[ "$sync_mode" == "1" || "$sync_mode" == "2" ]]; then
+                    read -r -p "➤ 是否排除 Fork 的项目？(Y/n，默认排除): " ask_fork
+                    if [[ "$ask_fork" == "n" || "$ask_fork" == "N" ]]; then
+                        exclude_forks="n"
+                    fi
+                fi
+
                 local keep_syncing="y"
                 while [[ "$keep_syncing" == "y" || "$keep_syncing" == "Y" ]]; do
                     local target_repo_name=""
@@ -554,9 +562,14 @@ github_sync_manager() {
                     for (( i=0; i<$repo_count; i++ )); do
                         local r_name=$(echo "$repos_json" | jq -r ".[$i].name")
                         local r_url=$(echo "$repos_json" | jq -r ".[$i].clone_url")
+                        local is_fork=$(echo "$repos_json" | jq -r ".[$i].fork")
                         
-                        # 模式 3 拦截：名称不匹配直接跳过
                         if [[ "$sync_mode" == "3" && "$r_name" != "$target_repo_name" ]]; then
+                            continue
+                        fi
+                        
+                        if [[ "$exclude_forks" == "y" && "$is_fork" == "true" && "$sync_mode" != "3" ]]; then
+                            echo -e "   \033[35m[-] [Fork跳过] \033[36m$r_name\033[0m\033[0m"
                             continue
                         fi
 
@@ -619,11 +632,9 @@ github_sync_manager() {
                         if [[ "$matched_count" == "0" ]]; then
                             warn "在 GitHub 账号 [${current_gh_alias}] 中未找到名为 [${target_repo_name}] 的仓库，请核对拼写。"
                         fi
-                        # 模式3专属的心流维持：无论成功还是拼错，都问您要不要继续下一个
                         echo -e -n "➤ 是否继续指定同步其他仓库？(y/n): "
                         read -r keep_syncing
                     else
-                        # 模式1和2执行完一遍即结束大循环
                         keep_syncing="n"
                     fi
                 done
