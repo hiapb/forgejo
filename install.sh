@@ -277,7 +277,6 @@ restore_backup() {
     
     local host_port=$(grep -oP '^SERVER_PORT=\K.*' .env || echo "3000")
 
-    # ================= [新增：动态网络拓扑适配逻辑] =================
     local app_ini_path="data/gitea/conf/app.ini"
     if [[ -f "$app_ini_path" ]]; then
         info "检测到系统配置文件，正在注入当前网络上下文..."
@@ -287,13 +286,11 @@ restore_backup() {
         read -r -p "请输入当前服务器的新域名或外网 IP [默认: $current_ip]: " new_domain
         new_domain=${new_domain:-$current_ip}
         
-        # 使用 sed 动态覆写配置文件中的硬编码网络参数
         sed -i "s|^DOMAIN\s*=.*|DOMAIN   = ${new_domain}|g" "$app_ini_path"
         sed -i "s|^ROOT_URL\s*=.*|ROOT_URL = http://${new_domain}:${host_port}/|g" "$app_ini_path"
         
         info "网络上下文已自愈：http://${new_domain}:${host_port}/"
     fi
-    # ==============================================================
     
     $(docker_compose_cmd) up -d || { err "启动失败。"; return; }
     
@@ -303,6 +300,47 @@ restore_backup() {
     echo -e "\033[32m✅ 恢复完成！\033[0m"
     echo -e "访问地址: \033[36mhttp://${server_ip}:${host_port}\033[0m"
     echo -e "==================================================\n"
+}
+
+set_https_domain() {
+    clear
+    info "== 配置 HTTPS/域名访问 =="
+    local workdir=$(get_workdir)
+    local app_ini_path="${workdir}/data/gitea/conf/app.ini"
+    
+    if [[ ! -f "$app_ini_path" ]]; then
+        err "未找到核心配置文件 (${app_ini_path})。请确认服务已成功部署并运行过至少一次。"
+        sleep 2
+        return
+    fi
+
+    echo -e "\033[33m提示：此操作旨在消除 ROOT_URL 不匹配警告，并修正仓库克隆链接。\033[0m"
+    echo -e "\033[33m(系统要求外部的 SSL 证书与反向代理，如 Nginx，仍需您在宿主机自行配置完备)\033[0m"
+    read -r -p "请输入您绑定的域名 (例如: git.yourdomain.com): " raw_domain
+    
+    # 数据清洗核心：防御性编程，应对复制粘贴带来的冗余字符
+    local clean_domain=$(echo "$raw_domain" | sed -E 's|^https?://||' | sed 's|/.*||')
+    
+    if [[ -z "$clean_domain" ]]; then
+        err "域名不能为空，操作已取消。"
+        sleep 1
+        return
+    fi
+
+    info "正在覆写底层路由配置..."
+    # 强制将协议提升为 https，并确保尾部带有斜杠
+    sed -i "s|^DOMAIN\s*=.*|DOMAIN   = ${clean_domain}|g" "$app_ini_path"
+    sed -i "s|^ROOT_URL\s*=.*|ROOT_URL = https://${clean_domain}/|g" "$app_ini_path"
+
+    info "正在重启服务以释放旧的路由映射缓存..."
+    cd "$workdir" && $(docker_compose_cmd) restart >/dev/null 2>&1
+    
+    echo -e "\n=================================================="
+    echo -e "\033[32m✅ 域名配置已重塑！\033[0m"
+    echo -e "当前基准 URL (ROOT_URL): \033[36mhttps://${clean_domain}/\033[0m"
+    echo -e "\033[35m[安全提醒]\033[0m 请务必确保您的 Nginx 已开启: proxy_set_header X-Forwarded-Proto \$scheme;"
+    echo -e "==================================================\n"
+    read -r -p "按回车键返回..."
 }
 
 setup_auto_backup() {
@@ -690,10 +728,11 @@ main_menu() {
     echo "  8) 完全卸载"
     echo "  9) 📂 FTP/SFTP 备份工具"
     echo " 10) GitHub 账号同步管理"
+    echo " 11) 配置 HTTPS/域名访问"
     echo "  0) 退出脚本"
     echo "==================================================="
     
-    read -r -p "请输入序号 [0-10]: " choice
+    read -r -p "请输入序号 [0-11]: " choice
     case "$choice" in
         1) deploy_forgejo ;;
         2) check_deployed && upgrade_service ;;
@@ -705,6 +744,7 @@ main_menu() {
         8) check_deployed && uninstall_service ;;
         9) install_ftp ;;
         10) check_deployed && github_sync_manager ;;
+        11) check_deployed && set_https_domain ;;
         0) info "欢迎下次使用，再见!"; exit 0 ;;
         *) warn "无效的指令，请重新输入。" ;;
     esac
