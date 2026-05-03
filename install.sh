@@ -275,10 +275,29 @@ restore_backup() {
     
     chmod -R 777 data postgres_data || true
     
+    local host_port=$(grep -oP '^SERVER_PORT=\K.*' .env || echo "3000")
+
+    # ================= [新增：动态网络拓扑适配逻辑] =================
+    local app_ini_path="data/gitea/conf/app.ini"
+    if [[ -f "$app_ini_path" ]]; then
+        info "检测到系统配置文件，正在注入当前网络上下文..."
+        
+        local current_ip=$(get_local_ip)
+        echo -e "\033[33m➤ 正在重塑应用的基准路由 (ROOT_URL)\033[0m"
+        read -r -p "请输入当前服务器的新域名或外网 IP [默认: $current_ip]: " new_domain
+        new_domain=${new_domain:-$current_ip}
+        
+        # 使用 sed 动态覆写配置文件中的硬编码网络参数
+        sed -i "s|^DOMAIN\s*=.*|DOMAIN   = ${new_domain}|g" "$app_ini_path"
+        sed -i "s|^ROOT_URL\s*=.*|ROOT_URL = http://${new_domain}:${host_port}/|g" "$app_ini_path"
+        
+        info "网络上下文已自愈：http://${new_domain}:${host_port}/"
+    fi
+    # ==============================================================
+    
     $(docker_compose_cmd) up -d || { err "启动失败。"; return; }
     
     local server_ip=$(get_local_ip)
-    local host_port=$(grep -oP '^SERVER_PORT=\K.*' .env || echo "3000")
     
     echo -e "\n=================================================="
     echo -e "\033[32m✅ 恢复完成！\033[0m"
@@ -449,7 +468,7 @@ github_sync_manager() {
     while true; do
         clear
         echo "==================================================="
-        echo "              GitHub 账号同步管理               "
+        echo "              GitHub 账号同步管理                "
         echo "==================================================="
         echo "  1) 添加账号"
         echo "  2) 删除账号"
@@ -659,7 +678,7 @@ main_menu() {
     echo "                 Forgejo 一键管理                 "
     echo "==================================================="
     local wd=$(get_workdir)
-    echo -e " 实例路径: \033[36m${wd:-未部署 (请先执行部署或恢复)}\033[0m"
+    echo -e " 实例路径: \033[36m${wd:-未部署}\033[0m"
     echo "---------------------------------------------------"
     echo "  1) 一键部署"
     echo "  2) 升级服务"
